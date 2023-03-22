@@ -2,8 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use GuzzleHttp\Client;
+use App\Services\MinecraftLookupService;
+use App\Services\SteamLookupService;
+use App\Services\XblLookupService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Class LookupController
@@ -11,91 +15,74 @@ use Illuminate\Http\Request;
  * @package App\Http\Controllers
  */
 class LookupController extends Controller
-{
-    public function lookup(Request $request) {
-        if ($request->get('type') == 'minecraft') {
-            if ($request->get('username')) {
-                $username = $request->get('username');
-                $userId = false;
+{  
+    protected $minecraftLookupService;
+    protected $steamLookupService;
+    protected $xblLookupService;
+
+    /**
+     * @param MinecraftLookupService $minecraftLookupService
+     * @param SteamLookupService $steamLookupService
+     * @param XblLookupService $xblLookupService
+     */
+    public function __construct(
+        MinecraftLookupService $minecraftLookupService, 
+        SteamLookupService $steamLookupService, 
+        XblLookupService $xblLookupService
+    ){
+        $this->minecraftLookupService = $minecraftLookupService;
+        $this->steamLookupService = $steamLookupService;
+        $this->xblLookupService = $xblLookupService;
+    }
+    public function lookup(Request $request)
+    {
+        try {
+            $validate = $request->validate([
+                'username' => 'nullable|string',
+                'id' => 'nullable|string',
+                'type' => 'required|string|in:minecraft,steam,xbl',
+            ]);            
+            $username = $validate['username'] ?? null;
+            $userId = $validate['id'] ?? null;
+            $type = $validate['type'];
+
+            $cache = $type . '-' . $userId . '-' . $username;
+            if (Cache::has($cache)) {
+                $response = Cache::get($cache);
+            } else {            
+                switch ($type) {
+                    case 'minecraft':
+                        $result = $this->minecraftLookupService->lookup($username, $userId);
+                        break;
+                    case 'steam':
+                        $result = $this->steamLookupService->lookup($username, $userId);
+                        break;
+                    case 'xbl':
+                        $result = $this->xblLookupService->lookup($username, $userId);
+                        break;
+                    default:
+                        abort(500, "Invalid type parameter");
+                        break;
+                }
+                $response = response()->json($result);
+                $status = $response->getStatusCode();
+
+                if ($status == 200) {
+                    Cache::put($cache, $result, 5 * 60);                    
+                }
             }
-            if ($request->get('id')){
-                $username=false;
-                $userId = $request->get('id');
-            }
-
-            if ($username) {
-                $guzzle = new Client();
-                $response = $guzzle->get(
-                    "https://api.mojang.com/users/profiles/minecraft/{$username}"
-                );
-
-                $match = json_decode($response->getBody()->getContents());
-
-                return [
-                    'username' => $match->name,
-                    'id' => $match->id,
-                    'avatar' => "https://crafatar.com/avatars" . $match->id
-                ];
-            }
-
-            if ($userId)
-            {
-                $guzzle = new Client();
-                $response = $guzzle->get(
-                    "https://sessionserver.mojang.com/session/minecraft/profile/{$userId}"
-                );
-
-                $match = json_decode($response->getBody()->getContents());
-                return [
-                    'username' => $match->name,
-                    'id' => $match->id,
-                    'avatar' => "https://crafatar.com/avatars" . $match->id
-                ];
-            }
-        } elseif ($request->get('type')=='steam') {
-            if ($request->get("username")) {
-                die("Steam only supports IDs");
-            } else {
-                $id = $request->get("id");
-                $guzzle = new Client();
-                $url = "https://ident.tebex.io/usernameservices/4/username/{$id}";
-
-                $match = json_decode($guzzle->get($url)->getBody()->getContents());
-
-                return [
-                    'username' => $match->username,
-                    'id' => $match->id,
-                    'avatar' => $match->meta->avatar
-                ];
-            }
-
-        }elseif($request->get('type') === 'xbl'){
-            if ($request->get("username")) {
-                $guzzle = new Client();
-                $response = $guzzle->get("https://ident.tebex.io/usernameservices/3/username/" . $request->get("username") . "?type=username");
-                $profile = json_decode($response->getBody()->getContents());
-
-                return [
-                    'username' => $profile->username,
-                    'id' => $profile->id,
-                    'avatar' => $profile->meta->avatar
-                ];
-            }
-
-            if ($request->get("id")) {
-                $id = $request->get("id");
-                $guzzle = new Client();
-                $response = $guzzle->get("https://ident.tebex.io/usernameservices/3/username/" . $id);
-                $profile = json_decode($response->getBody()->getContents());
-
-                return [
-                    'username' => $profile->username,
-                    'id' => $profile->id,
-                    'avatar' => $profile->meta->avatar
-                ];
-            }
+            return $response;
+        } catch (ValidationException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'errors' => $e->errors(),
+            ], 422);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => $e->getMessage()
+            ], 500);
         }
-        //We can't handle this - maybe provide feedback?
-        die();
     }
 }
+
+
